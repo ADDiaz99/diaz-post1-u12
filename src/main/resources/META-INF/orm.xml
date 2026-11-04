@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mapeo JPA de SolicitudReembolso hecho en XML y no con anotaciones.
+  Asi el dominio sigue sin importar jakarta.persistence (checkpoint del Paso 1)
+  y aun asi RepositorioSolicitudesJpa puede extender JpaRepository<SolicitudReembolso, Long>.
+  Los atributos que no aparecen aqui se mapean como columnas basicas por defecto.
+-->
+<entity-mappings xmlns="https://jakarta.ee/xml/ns/persistence/orm"
+                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xsi:schemaLocation="https://jakarta.ee/xml/ns/persistence/orm https://jakarta.ee/xml/ns/persistence/orm/orm_3_1.xsd"
+                 version="3.1">
+
+    <entity class="com.empresa.reembolsos.dominio.SolicitudReembolso" access="FIELD">
+        <table name="solicitud_reembolso"/>
+        <attributes>
+            <id name="id">
+                <generated-value strategy="IDENTITY"/>
+            </id>
+            <basic name="categoria">
+                <enumerated>STRING</enumerated>
+            </basic>
+            <basic name="estado">
+                <enumerated>STRING</enumerated>
+            </basic>
+        </attributes>
+    </entity>
+</entity-mappings>
