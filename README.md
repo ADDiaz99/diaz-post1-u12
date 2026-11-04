@@ -7,9 +7,10 @@ Spring Boot 4.1.1, Java 17 o superior (probado con Java 26), Maven 3.9 y H2 en m
 
 1. [Diseño Propuesto](#1-diseño-propuesto)
 2. [Decisiones de diseño (Parte 1)](#2-decisiones-de-diseño-parte-1)
-3. [Pruebas](#3-pruebas)
-4. [Cómo ejecutar](#4-cómo-ejecutar)
-5. [Ajustes respecto al enunciado](#5-ajustes-respecto-al-enunciado)
+3. [Qué se descartó y por qué](#3-qué-se-descartó-y-por-qué)
+4. [Pruebas](#4-pruebas)
+5. [Cómo ejecutar](#5-cómo-ejecutar)
+6. [Ajustes respecto al enunciado](#6-ajustes-respecto-al-enunciado)
 
 ---
 
@@ -83,7 +84,7 @@ com.empresa.reembolsos
   detectaría antes. Y hay un límite honesto: el servicio carga las pendientes **antes** de entrar
   a la cadena, así que la consulta a la base de datos se paga siempre. El orden ahorra la
   comparación en memoria, no la consulta. Ahorrar también la consulta exigiría cargarlas de forma
-  perezosa; esa alternativa se evaluará en el análisis de impacto de la Parte 2.
+  perezosa, y se descartó por ahora (sección 3).
 
 El orden queda escrito en un solo lugar, el constructor de `CadenaValidadores`, y lo verifica
 `CadenaValidadoresTest.laCadenaSeCortaEnElPrimerEslabonQueFalla`: una solicitud sin documentos y
@@ -113,7 +114,59 @@ una excepción al arrancar, así que el error se ve de inmediato.
 
 ---
 
-## 3. Pruebas
+## 3. Qué se descartó y por qué
+
+Criterio de la Guía: ¿la variabilidad que justificaría la alternativa es **real y documentada hoy**,
+o es especulación sobre un futuro que no ha llegado? Ninguno de estos descartes es definitivo: cada
+uno dice qué señal haría reconsiderarlo.
+
+### Ejemplos de referencia de la guía
+
+**`ApplicationEventPublisher` en lugar de inyectar `List<ObservadorCambioEstado>`.** Con tres
+observadores fijos y conocidos al compilar, un bus de eventos genérico no agrega desacoplamiento (ya
+lo da la interfaz) y sí hace más difícil rastrear quién reacciona a qué.
+*Señal para reconsiderar:* que los interesados vivan en módulos que no deban conocerse, o que se
+necesite notificar de forma asíncrona.
+
+**Visitor o Abstract Factory para exportar reportes en varios formatos.** Hoy solo existe el
+requisito de CSV; no hay una segunda petición real de otro formato, así que no se cumple la Rule of
+Three. *Señal para reconsiderar:* una solicitud concreta de un segundo y un tercer formato.
+
+### Descartes propios surgidos durante la implementación
+
+**1. Cargar las solicitudes pendientes de forma perezosa (`Supplier<List<...>>`).**
+- *Qué se consideró:* pasar a la cadena un `Supplier` en lugar de la lista, para que la consulta a
+  la base de datos solo ocurra si la solicitud llega al último eslabón. Salió directamente de la
+  Decisión 1, al notar que el orden de la cadena no evita la consulta.
+- *Por qué se descartó:* es una sola consulta por creación, filtrada por empleado y estado, sobre
+  unas pocas filas. A cambio, cambiaría la firma de `validar` y `validarPropio` de **todos** los
+  eslabones para optimizar solo uno. Es una optimización sin una medición que la pida.
+- *Señal para reconsiderar:* la verificación de "límite anual acumulado" que Finanzas anunció. Esa
+  sí necesitaría leer el historial de un año por empleado; si esa consulta resulta costosa, la carga
+  perezosa pasa a estar justificada.
+
+**2. Encadenar los validadores automáticamente con `List<ValidadorSolicitud>` y `@Order`.**
+- *Qué se consideró:* que Spring inyecte todos los validadores y que `CadenaValidadores` los enlace
+  en un ciclo, ordenados con `@Order`, para no tener que editar el constructor al agregar uno.
+- *Por qué se descartó:* con tres eslabones, el orden es una decisión de diseño (Decisión 1) que hoy
+  se lee completa en una línea. Con `@Order` quedaría repartido en números mágicos dentro de cada
+  clase, y nada impediría que dos validadores tuvieran el mismo número. Se ganaría ahorrar una línea
+  y se perdería legibilidad.
+- *Señal para reconsiderar:* cuando lleguen las verificaciones nuevas y la cadena pase de cinco o
+  seis eslabones, o si otros equipos empiezan a aportar validadores desde sus propios módulos.
+
+**3. DTOs y un mapper para la API REST en lugar de recibir y devolver `SolicitudReembolso`.**
+- *Qué se consideró:* un `CrearSolicitudRequest` y un `SolicitudResponse`, para que el cliente no
+  pueda enviar campos que no le corresponden (`id`, `estado`, `montoAprobado`).
+- *Por qué se descartó:* el servicio ya ignora esos tres campos al crear (pone `id` en `null`,
+  calcula el monto y fija el estado), así que hoy no hay ningún dato que un DTO protegería. Serían
+  tres clases nuevas por endpoint sin un problema real que resolver.
+- *Señal para reconsiderar:* que la API deba diferir del dominio (versiones de la API, campos
+  internos que no deben salir) o que aparezca un campo que el servicio no pueda sobrescribir.
+
+---
+
+## 4. Pruebas
 
 | Clase de prueba | Tipo | Pruebas |
 |---|---|---|
@@ -134,7 +187,7 @@ aprobar se enteran los tres interesados y que al rechazar Contabilidad no reacci
 
 ---
 
-## 4. Cómo ejecutar
+## 5. Cómo ejecutar
 
 ```
 mvn clean verify                               # 33 pruebas
@@ -155,7 +208,7 @@ curl -X PUT http://localhost:8080/api/solicitudes/1/estado -H "Content-Type: app
 
 ---
 
-## 5. Ajustes respecto al enunciado
+## 6. Ajustes respecto al enunciado
 
 | En la guía | Problema | Qué se hizo |
 |---|---|---|
