@@ -5,12 +5,15 @@ Spring Boot 4.1.1, Java 17 o superior (probado con Java 26), Maven 3.9 y H2 en m
 
 **Contenido**
 
-1. [Diseño Propuesto](#1-diseño-propuesto)
-2. [Decisiones de diseño (Parte 1)](#2-decisiones-de-diseño-parte-1)
-3. [Qué se descartó y por qué](#3-qué-se-descartó-y-por-qué)
-4. [Pruebas](#4-pruebas)
-5. [Cómo ejecutar](#5-cómo-ejecutar)
-6. [Ajustes respecto al enunciado](#6-ajustes-respecto-al-enunciado)
+1. [Diseño Propuesto](#1-diseño-propuesto) (escrito antes de implementar los patrones)
+2. [Decisiones de diseño 1 a 4](#2-decisiones-de-diseño)
+3. [Resumen de ADR-001](#3-resumen-de-adr-001)
+4. [Qué se descartó y por qué](#4-qué-se-descartó-y-por-qué)
+5. [Arquitectura resultante y reglas ArchUnit](#5-arquitectura-resultante-y-reglas-archunit)
+6. [Integración continua: violación intencional y corrección](#6-integración-continua-violación-intencional-y-corrección)
+7. [Pruebas](#7-pruebas)
+8. [Cómo ejecutar](#8-cómo-ejecutar)
+9. [Ajustes respecto al enunciado](#9-ajustes-respecto-al-enunciado)
 
 ---
 
@@ -65,7 +68,7 @@ com.empresa.reembolsos
 
 ---
 
-## 2. Decisiones de diseño (Parte 1)
+## 2. Decisiones de diseño
 
 ### Decisión 1: orden de la cadena de validación
 
@@ -84,7 +87,7 @@ com.empresa.reembolsos
   detectaría antes. Y hay un límite honesto: el servicio carga las pendientes **antes** de entrar
   a la cadena, así que la consulta a la base de datos se paga siempre. El orden ahorra la
   comparación en memoria, no la consulta. Ahorrar también la consulta exigiría cargarlas de forma
-  perezosa, y se descartó por ahora (sección 3).
+  perezosa, y se descartó por ahora (sección 4).
 
 El orden queda escrito en un solo lugar, el constructor de `CadenaValidadores`, y lo verifica
 `CadenaValidadoresTest.laCadenaSeCortaEnElPrimerEslabonQueFalla`: una solicitud sin documentos y
@@ -112,9 +115,60 @@ Consecuencias: el paquete `validacion` depende de `calculo` (los dos dentro de `
 que las reglas permiten). Si dos calculadoras declaran la misma categoría, `Collectors.toMap` lanza
 una excepción al arrancar, así que el error se ve de inmediato.
 
+### Decisión 3: capas simples para la persistencia; la notificación no cambia
+
+Se mantiene `SolicitudReembolsoService → RepositorioSolicitudesJpa` sin puerto intermedio, y el
+paquete de notificación no se modifica porque `ObservadorCambioEstado` ya es el punto de extensión
+para la integración que anunció Contabilidad. El razonamiento completo está en la sección 3 y en
+[docs/adr/ADR-001.md](docs/adr/ADR-001.md).
+
+### Decisión 4: la Regla 1 permite estereotipos de Spring, pero no acceso a datos ni web
+
+La Regla 1 prohíbe que `procesamiento` dependa de `org.springframework.data`,
+`jakarta.persistence`, `org.springframework.web` y `org.springframework.http`, pero **no** de
+todo `org.springframework`:
+
+- **`@Component` es metadato.** Solo lo lee el contenedor para crear el objeto; no participa en la
+  lógica. Las 27 pruebas unitarias crean validadores, calculadoras y notificadores con `new`, sin
+  levantar Spring, y funcionan igual. Quitar Spring sería borrar una anotación por clase.
+- **Un repositorio JPA o una clase web sí es comportamiento.** Si un validador recibiera
+  `RepositorioSolicitudesJpa` o un `HttpServletRequest`, su lógica dependería de una base de datos o
+  de una petición HTTP y ya no se podría probar con `new`. Ese acoplamiento es el que la regla debe
+  impedir.
+- **Prohibir todo `org.springframework`** obligaría a registrar cada validador, calculadora y
+  notificador a mano en una clase `@Configuration` con métodos `@Bean`: más código y otro lugar que
+  editar por cada categoría nueva, sin un beneficio real en este proyecto (YAGNI).
+
+La guía nombra la regla `procesamientoSinPersistenciaNiWeb` pero no incluía los paquetes web; se
+agregaron `org.springframework.web..` y `org.springframework.http..` para que la regla diga lo que
+promete su nombre.
+
 ---
 
-## 3. Qué se descartó y por qué
+## 3. Resumen de ADR-001
+
+Documento completo: [docs/adr/ADR-001.md](docs/adr/ADR-001.md). Estado: **Aceptado**.
+
+La Guía dice que la arquitectura Hexagonal vale la pena en sistemas que vivirán 3 años o más **con
+cambios de infraestructura**. Se evaluó por separado cada dependencia externa:
+
+| Dependencia | ¿Hay un cambio de infraestructura real y conocido? | Decisión |
+|---|---|---|
+| Persistencia | No. No existe ningún plan de cambiar de motor de base de datos. El servicio usa un solo método derivado (`findByEmpleadoIdAndEstado`) más `save` y `findById`. | **Capas simples.** Sin puerto `RepositorioSolicitudes` ni adaptador. |
+| Notificación | Sí: Contabilidad integrará una API externa el próximo trimestre. | **Sin cambios.** `ObservadorCambioEstado` ya es el seam: `NotificadorContabilidad` puede llamar a la API sin tocar el servicio ni los demás observadores. |
+
+Un dato del propio proyecto pesa a favor de no introducir el puerto: el dominio ya no depende de
+JPA, porque su mapeo está en `META-INF/orm.xml`. La parte más valiosa de Hexagonal en este sistema
+(un dominio que se prueba sin infraestructura) se obtiene sin el puerto.
+
+**Positivo:** no hay interfaces ni mappers especulativos, y el único cambio con fecha ya tiene su
+punto de extensión. **Negativo:** si algún día se cambia de base de datos, el puerto se introducirá
+después (deuda aceptada de forma consciente), y alguien que espere simetría total puede ver la
+asimetría como una inconsistencia si no lee el ADR.
+
+---
+
+## 4. Qué se descartó y por qué
 
 Criterio de la Guía: ¿la variabilidad que justificaría la alternativa es **real y documentada hoy**,
 o es especulación sobre un futuro que no ha llegado? Ninguno de estos descartes es definitivo: cada
@@ -166,7 +220,65 @@ Three. *Señal para reconsiderar:* una solicitud concreta de un segundo y un ter
 
 ---
 
-## 4. Pruebas
+## 5. Arquitectura resultante y reglas ArchUnit
+
+Dependencias entre paquetes del código final (obtenidas con `jdeps`):
+
+```
+adaptadores.rest            ──► aplicacion, dominio
+aplicacion                  ──► procesamiento.validacion, procesamiento.calculo,
+                                procesamiento.notificacion, infraestructura, dominio
+procesamiento.validacion    ──► procesamiento.calculo, dominio
+procesamiento.calculo       ──► dominio
+procesamiento.notificacion  ──► dominio
+infraestructura             ──► dominio (y Spring Data JPA)
+dominio                     ──► nada fuera de java.*
+```
+
+Todas las flechas apuntan hacia el dominio y ninguna sale de él. `procesamiento` no conoce ni la
+base de datos ni la web. `infraestructura` es el único paquete que usa Spring Data, y el dominio se
+mapea a la tabla `solicitud_reembolso` desde `src/main/resources/META-INF/orm.xml`.
+
+Reglas en `src/test/java/com/empresa/reembolsos/ReglasArquitectura.java` (solo analizan el código de
+producción, con `ImportOption.DoNotIncludeTests`):
+
+| # | Regla | Qué protege |
+|---|---|---|
+| 1 | `procesamientoSinPersistenciaNiWeb` | Los patrones no dependen de `infraestructura`, `adaptadores`, Spring Data, JPA ni la web. |
+| 2 | `controladorSoloUsaServicio` | El controlador solo accede al servicio, al dominio y a clases web; no puede saltarse el servicio. |
+| 3 | `calculadorasImplementanInterfaz` | Toda clase `Calculadora*` implementa `CalculadoraReembolso`, o el selector no la encontraría. |
+| 4 | `notificadoresImplementanInterfaz` | Todo notificador implementa `ObservadorCambioEstado`, o el servicio no le avisaría. |
+| 5 | `dominioSinFrameworks` (adicional) | El dominio no depende de Spring ni de Jakarta: el checkpoint del Paso 1 queda como prueba automática. |
+
+![Reglas de arquitectura en verde](docs/02-reglas-arquitectura.png)
+
+---
+
+## 6. Integración continua: violación intencional y corrección
+
+El workflow `.github/workflows/arquitectura.yml` corre en cada push y pull request a `main`:
+primero las reglas de arquitectura y luego la suite completa con `mvn verify`.
+
+Para comprobar que el pipeline detecta una violación, se agregó a `ValidadorDuplicados` un campo de
+tipo `RepositorioSolicitudesJpa` (viola la Regla 1) y se subió. Se usó un campo y no solo un
+`import`, porque un `import` que no se usa desaparece al compilar y ArchUnit, que analiza el
+bytecode, no lo vería. Luego se revirtió con `git revert`.
+
+**Build fallido por la violación intencional:**
+
+![GitHub Actions en rojo](docs/03-actions-rojo.png)
+
+**Build en verde después del revert:**
+
+![GitHub Actions en verde](docs/04-actions-verde.png)
+
+**Historial de ejecuciones (rojo y luego verde):**
+
+![Historial de GitHub Actions](docs/05-historial-actions.png)
+
+---
+
+## 7. Pruebas
 
 | Clase de prueba | Tipo | Pruebas |
 |---|---|---|
@@ -176,7 +288,8 @@ Three. *Señal para reconsiderar:* una solicitud concreta de un segundo y un ter
 | `CadenaValidadoresTest` | Unitaria | 3 |
 | `NotificadorContabilidadTest`, `NotificadorEmpleadoTest` | Unitaria | 2 + 1 |
 | `FlujoSolicitudReembolsoIntegracionTest` | Integración `@SpringBootTest` (HTTP + JPA + H2) | 6 |
-| **Total** | | **33** |
+| `ReglasArquitectura` | ArchUnit | 5 |
+| **Total** | | **38** |
 
 La prueba de integración recorre el flujo completo por HTTP: crea solicitudes de las tres
 categorías y comprueba su monto aprobado, rechaza una sin documentos y un duplicado con un mensaje
@@ -187,10 +300,11 @@ aprobar se enteran los tres interesados y que al rechazar Contabilidad no reacci
 
 ---
 
-## 5. Cómo ejecutar
+## 8. Cómo ejecutar
 
 ```
-mvn clean verify                               # 33 pruebas
+mvn clean verify                               # 38 pruebas
+mvn test -Dtest=ReglasArquitectura             # solo las 5 reglas
 mvn spring-boot:run                            # API en http://localhost:8080
 ```
 
@@ -208,7 +322,7 @@ curl -X PUT http://localhost:8080/api/solicitudes/1/estado -H "Content-Type: app
 
 ---
 
-## 6. Ajustes respecto al enunciado
+## 9. Ajustes respecto al enunciado
 
 | En la guía | Problema | Qué se hizo |
 |---|---|---|
@@ -217,6 +331,12 @@ curl -X PUT http://localhost:8080/api/solicitudes/1/estado -H "Content-Type: app
 | Mapa `TOPES` propio del validador | Una categoría nueva sin tope causaba `NullPointerException` | Igual que el anterior: un solo lugar por categoría |
 | `ValidadorDuplicados` comparaba solo `getMonth()` | Octubre de 2025 chocaba con octubre de 2026 | Se compara el periodo con `YearMonth` |
 | `SolicitudInvalidaException` sin manejo | El rechazo llegaba como error 500 | `@ExceptionHandler` con `ProblemDetail`: 400 si es inválida, 404 si no existe |
+| Regla 2 sin el paquete del propio controlador | Leer su campo `servicio` ya es un acceso: la regla fallaba | Se incluye `..adaptadores.rest..` |
+| Regla 3 sobre todo el paquete `calculo` | `SelectorCalculadora` no es una calculadora: la regla fallaba | Se filtra por nombre `Calculadora*` |
+| `@AnalyzeClasses` sin opciones | Las pruebas viven en los mismos paquetes y rompen las reglas 3 y 4 | `ImportOption.DoNotIncludeTests` |
+| Clase `ReglasArquitectura` | Su nombre no termina en `Test`: `mvn test` y `mvn verify` no la ejecutaban | Surefire la incluye explícitamente en el `pom.xml` |
+| Violación con un `import` sin usar | El `import` no queda en el bytecode: el pipeline no fallaba | Se usa un campo del tipo prohibido |
+| `archunit-junit5` 1.2.1 | Spring Boot 4 trae JUnit 6, y esa versión no lee clases de Java 26 | `archunit-junit6` 1.5.1 |
+| `actions/checkout@v4`, `setup-java@v4`, `actions/cache@v3` | Versiones anteriores | `@v5` y la caché de Maven de `setup-java` |
 | `crear` guardaba el `id` enviado por el cliente | Un POST con `id` podía sobrescribir otra solicitud | El servicio pone `id` en `null` antes de guardar |
 | `cambiarEstado` al mismo estado | Notificaba un "cambio" que no ocurrió | Si el estado no cambia, no se notifica |
-
